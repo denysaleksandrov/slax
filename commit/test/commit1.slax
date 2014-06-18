@@ -1,0 +1,20 @@
+/* check-fxp0-inheritance.slax */ 
+version 1.0;
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+
+import "../import/junos.xsl"; 
+
+match configuration {
+    var $configured-host-name = system/host-name;
+    /* If hostname is configured, but not inherited from re group, then display warning */
+    if( $configured-host-name &&
+            jcs:empty( $configured-host-name[@junos:group=="re0" || 
+                                             @junos:group=="re1"] ) ) { 
+        <xnm:warning> {
+            <message> "hostaname configuration is present but not inherited from re group";
+        }
+    }
+}

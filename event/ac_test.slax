@@ -1,0 +1,231 @@
+version 1.0; 
+  
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+      
+import "../import/junos.xsl";
+
+/* Open connection here */
+var $connection = jcs:open();
+
+/* RE Mastership variables */
+var $master = "master";
+var $backup = "backup";
+
+/* Determine the master state globally */
+var $local-re = { call get-local-re(); }
+var $re-slot  = { call get-slot-number( $re = $local-re ); }
+var $re-state = { call get-re-state( $slot = $re-slot ); }
+
+/* Status values */
+ var $active = "active";
+ var $inactive = "inactive";
+
+/* New Status */
+param $new-status;
+
+match / {
+     call main();
+}
+
+template main() {
+    <event-script-results> {
+     
+    /*   
+    * First check if we are master or backup, the backup re will pause a minute
+    * to allow the master to correct the configuration first.  The backup will only 
+    * modify the config if the master didn't for some reason.
+    */   
+    if( $re-state != $master ) {
+       /* Send message to syslog and stop */
+       var $message = $script _ " executed wrongly on the backup RE";
+       expr jcs:syslog( "external.warn", $message );
+       <xsl:message terminate="yes"> "Halting due to backup RE.";
+    }    
+    
+    /* Get the current committed configuration */
+    var $get-config-rpc =  <get-configuration database="committed"> {
+                                <configuration> {
+                                   <firewall> {
+                                       <family> {
+                                            <inet> {
+                                                <filter> {
+                                                    <name> "SHAPE";
+                                                }
+                                            }
+                                        }
+                                    }                                    
+                                }    
+                            }    
+    var $configuration = jcs:execute($connection, $get-config-rpc );
+    /* Error Check, syslog any present errors and close the script */
+    if( $configuration/..//xnm:error ) {
+        var $message = $script _ " had an error loading the configuration.";
+        expr jcs:syslog( "external.warn", $message );
+        <xsl:message terminate="yes"> "Halting due to error.";
+    }    
+      
+    /* Gather any needed configuration changes */
+    var $load-configuration = { call load-terms-and-generate-changes( $configuration ); }
+    
+    if( string-length( $load-configuration) > 0 ) { 
+        call do-commit( $connection, $load-configuration );
+    } 
+    }
+}
+
+template load-terms-and-generate-changes( $configuration ) {
+    var $firewall-terms = $configuration/firewall/family/inet/filter/term;
+    var $config-changes = { 
+        for-each( $firewall-terms ) {
+            if ( name != "default" and name != "INET_SHBD" ) {
+                call process-term( $term = .); 
+            }   
+        }
+    } 
+    /* A length > 0 means that config changes are present */
+    <load-configuration> {
+        <configuration> {
+            copy-of $config-changes;
+        }
+    }
+}
+
+template do-commit( $connection, $load-configuration ) {
+    /* Load the configuration changes */
+    var $load-results = jcs:execute( $connection, $load-configuration );
+             
+    /* Was there an error loading? */
+    if( not( jcs:empty( $load-results/..//xnm:error ) ) ) {
+        var $message = $script _ " unable to load exclusive configuration changes.";
+        expr jcs:syslog( "external.warn", $message );
+    } else {
+        /* Commit the configuration */
+        var $commit-configuration = <commit-configuration> ;
+        var $commit-results = jcs:execute( $connection, $commit-configuration );
+      
+        /* Was there an error committing? */
+        if( not( jcs:empty( $commit-results/..//xnm:error ) ) ) {
+            var $message = $script _ " unable to commit exclusive changes.";
+            expr jcs:syslog( "external.warn", $message );
+        } else {
+            /* Close the connection */
+            var $close-results = jcs:close( $connection );
+            /* Was there an error closing the connection?  The commit already was successful, so just syslog about it */
+            if( not( jcs:empty( $close-results/..//xnm:error ) ) ) {
+                var $message = $script _ " unable to close connection.";
+                expr jcs:syslog( "external.warn", $message );
+            }
+        }
+    }
+}
+
+
+template process-term( $term ) {
+    var $current-status = {
+        if( $term/@inactive == $inactive ) {
+            expr $inactive;
+        }    
+        else {
+            expr $active;
+        }
+    }
+
+    /* Does new status = current status?  If not then fix it! */
+    if( $new-status != $current-status ) {
+        var $term-change = {
+            if( $new-status == $active ) {
+                /* Syslog the change! */
+                expr jcs:syslog( "external.info", "time-based-filters script activating term ", $term/name );
+                <term active="active"> {
+                    <name> $term/name;
+                }
+            }
+            else {
+                expr jcs:syslog( "external.info", "time-based-filters script deactivating term ", $term/name );
+                <term inactive="inactive"> {
+                    <name> $term/name;
+                }
+            }
+        }
+        /* Have jcs:emit-change generate the change - it will process the hierarchy */
+        var $config-change := { call jcs:emit-change( $dot = $term/.., $content = $term-change ); }
+
+        /* Dump the contents of the <change> element - that is all we need for the configuration change */
+        copy-of $config-change/change/*;
+    }
+}
+
+ /* 
+  * Returns "re#" or "unknown" if it can't tell 
+  */
+template get-local-re() {
+    var $routing-engine-info = jcs:execute($connection, "get-route-engine-information" );
+    
+    /* Does it have slot information?  If not then it's a single slot machine so return re0 */
+    if( not( $routing-engine-info/route-engine/slot ) ) {
+        expr "re0";
+    }    
+    /* Does only re0 have the load-average-one tag?  That indicates the current RE. */
+    else if( $routing-engine-info/route-engine[slot == "0"]/load-average-one and
+            jcs:empty($routing-engine-info/route-engine[slot == "1"]/load-average-one) ) {
+        expr "re0";
+    }    
+    /* Does only re1 have the load-average-one tag?  That indicates the current RE. */
+    else if( $routing-engine-info/route-engine[slot == "1"]/load-average-one and
+            jcs:empty($routing-engine-info/route-engine[slot == "0"]/load-average-one) ) {
+        expr "re1";
+    }    
+}
+
+ /*  
+  * Returns slot # based on re# - simple template but prevents mistakes.
+  * Returns ? if it can't tell 
+  */ 
+template get-slot-number( $re ) {
+    if( string-length( $re ) == 0 ) {
+        expr "?";
+    }
+    else {
+        var $last-char = substring( $re, string-length( $re ), 1 );
+        /* Is it a number? */
+        if( string( number( $last-char ) ) != "NaN" ) {
+            expr $last-char;
+        }
+        else {
+            expr "?";
+        }
+    }
+}
+
+template get-re-state( $slot ) {
+    /* Determine state based on show chassis routing-engine */
+    var $routing-engine-info = jcs:execute($connection, "get-route-engine-information" );
+ 
+    /* Does it have slot information?  If not then it's a single slot machine so return master */
+    var $master-state = { call to-upper-case( $string = $routing-engine-info/route-engine[slot == $slot]/mastership-state ); }
+    if( not( $routing-engine-info/route-engine/slot ) ) {
+        expr $master;
+    }
+    else if( $master-state == "MASTER" ) {
+        expr $master;
+    }
+    else if( $master-state == "BACKUP" ) {
+        expr $backup;
+    }
+}
+
+/*
+ * Converts the provided string into upper case
+ */
+template to-upper-case( $string = "" ) {
+    expr translate( $string, "abcdefghijklmnopqrstuvwxyz", "ABCDEFGHIJKLMNOPQRSTUVWXYZ" );
+}
+
+/*
+ * Converts the provided string into lower case
+ */
+template to-lower-case( $string = "" ) {
+    expr translate( $string, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz" );
+}

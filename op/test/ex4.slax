@@ -1,0 +1,33 @@
+version 1.0;
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+
+import "../import/junos.xsl";
+
+/* Help description  */
+var $arguments = {
+    <argument> {
+        <name> "string1";
+        <description> "String to convirt";
+    }
+}
+/* CLI arguments */
+param $string1;
+
+template display-translate( $input = 'Empty' ){
+    <output> "Your converted sting -> " _ translate( $input, "abcdefghijklmnopqrstuvwxyz", "ABCDEFGHIJKLMNOPQRSTUVWXYZ" );
+}
+
+match / {
+    <op-script-results> {
+        <output> $string1; 
+        <output> jcs:printf( "%20s", $string1 );
+        <output> string-length($string1);
+        <output> substring-before( $string1, " " );
+        call display-translate {
+            with $input = $string1;
+        }
+    }
+}

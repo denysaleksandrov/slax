@@ -1,0 +1,45 @@
+version 1.0;
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+
+import "../import/junos.xsl";
+
+match / {
+    <op-script-results> {
+        var $config = jcs:invoke("get-configuration");
+        for-each( $config/firewall/family/inet/filter[ name == "SHAPE" ]/term ) {
+            if ( name != "ANY" ) {
+                var $change = {
+                    <configuration> {
+                        <firewall> {
+                            <family> {
+                                <inet> {
+                                    <filter> {
+                                        <name> "SHAPE";
+                                        <term inactive="inactive"> {
+                                            <name> name;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                call change-configuration($change);
+                var $message = "Deactivate term " _ name; 
+                <output> $message;
+                expr jcs:syslog( "external.notice", $message );
+            }
+        }
+    }
+}
+
+template change-configuration($change) {
+    var $connection = jcs:open();
+    var $results := { 
+        call jcs:load-configuration( $connection, $configuration = $change ); 
+        }
+    var $close-results = jcs:close($connection);
+}
