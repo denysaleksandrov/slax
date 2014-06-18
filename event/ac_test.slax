@@ -18,9 +18,10 @@ var $local-re = { call get-local-re(); }
 var $re-slot  = { call get-slot-number( $re = $local-re ); }
 var $re-state = { call get-re-state( $slot = $re-slot ); }
 
+
 /* Status values */
- var $active = "active";
- var $inactive = "inactive";
+var $active = "active";
+var $inactive = "inactive";
 
 /* New Status */
 param $new-status;
@@ -30,8 +31,7 @@ match / {
 }
 
 template main() {
-    <op-script-results> {
-     
+    <event-script-results> {
     /*   
     * First check if we are master or backup, the backup re will pause a minute
     * to allow the master to correct the configuration first.  The backup will only 
@@ -131,7 +131,6 @@ template process-term( $term ) {
             expr $active;
         }
     }
-
     /* Does new status = current status?  If not then fix it! */
     if( $new-status != $current-status ) {
         var $term-change = {
@@ -162,19 +161,16 @@ template process-term( $term ) {
   */
 template get-local-re() {
     var $routing-engine-info = jcs:execute($connection, "get-route-engine-information" );
-    
     /* Does it have slot information?  If not then it's a single slot machine so return re0 */
     if( not( $routing-engine-info/route-engine/slot ) ) {
         expr "re0";
     }    
     /* Does only re0 have the load-average-one tag?  That indicates the current RE. */
-    else if( $routing-engine-info/route-engine[slot == "0"]/load-average-one and
-            jcs:empty($routing-engine-info/route-engine[slot == "1"]/load-average-one) ) {
+    else if( $routing-engine-info/route-engine[slot == "0"]/mastership-state == "master") {
         expr "re0";
     }    
     /* Does only re1 have the load-average-one tag?  That indicates the current RE. */
-    else if( $routing-engine-info/route-engine[slot == "1"]/load-average-one and
-            jcs:empty($routing-engine-info/route-engine[slot == "0"]/load-average-one) ) {
+    else if( $routing-engine-info/route-engine[slot == "1"]/mastership-state == "master") {
         expr "re1";
     }    
 }
