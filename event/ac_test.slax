@@ -30,7 +30,7 @@ match / {
 }
 
 template main() {
-    <event-script-results> {
+    <op-script-results> {
      
     /*   
     * First check if we are master or backup, the backup re will pause a minute
