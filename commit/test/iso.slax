@@ -8,9 +8,33 @@ ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
 import "../import/junos.xsl"; 
 
 match configuration {
-
+    var $macro = "test";
     /* Loop through all logical interfaces */ 
-    for-each( interfaces/interface/unit/family ) {
-        <output> name;       
-    } 
-}
+    for-each (interfaces/interface/unit/apply-macro[ name == $macro ] ) {
+        /* Assing to varaibles. */
+        var $af1 = data[name=="af1"]/value;
+        var $af2 = data[name=="af2"]/value;
+        var $mtu = data[name=="mtu"]/value;
+        if(jcs:empty($af1) || jcs:empty($af2) || jcs:empty($mtu)) {
+            <xnm:error> {
+                call jcs:edit-path();
+                <message> {
+                    <xsl:text>"Macro test requires non-empyt values for af1, af2 and mtu.";
+                }
+            }
+        }
+        else {
+            call jcs:emit-change() {
+                with $dot = ..;
+                with $content= {
+                    <mtu> $mtu;
+                    <family> {
+                        <mpls>;
+                        <iso>;
+                    }
+                }
+            }
+        }
+    }
+} 
+
