@@ -1,0 +1,75 @@
+version 1.1;
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+ns ext = "http://xmlsoft.org/XSLT/namespace";
+
+import "../import/junos.xsl";
+
+match / {
+<op-script-results> {
+
+    var $usage = "Skrypt sluzy do wykreowania nowych podinterfejsow na potrzeby " _  
+                 "terminowania sesji PPPoE dla Neo. Parametrami wejsciowymi, " _ 
+				 "ktore beda musialy byc podane sa: numer portu fizycznego, " _
+				 "poczatkowy VLAN i ilosc VLANow do wykreowania."  _
+				 "                                                            ";
+				 
+    var $temp = jcs:output($usage);
+    var $interface = jcs:get-input("1/3 Podaj numer portu fizycznego - np. xe-0/0/0: ");
+	var $minimum = jcs:get-input("2/3 Podaj poczatkowy numer VLAN z zakresu - np. 1000: ");
+	var $range = jcs:get-input("3/3 Podaj ilosc VLANow do wykreowania - np. 10: ");
+	var $maximum = $minimum + $range - 1;
+	var $config-changes =  {
+        <configuration> {
+            <interfaces> {
+                <interface> {
+                    <name> $interface;
+					for $id($minimum ... $maximum) {   
+					    <unit> {
+							<name> $id;
+						    <encapsulation> "ppp-over-ether";      
+							<vlan-id> $id;
+							<pppoe-underlying-options> {
+								<dynamic-profile> "pppoe-DS-profile";
+								<max-sessions> "16000";
+								<short-cycle-protection> {
+									<lockout-time-min> "1";
+									<lockout-time-max> "300";
+									<filter> "aci";
+								}
+							}							
+						}
+					}					
+                }
+            }
+        }
+    }
+   	
+	var $load-action = "merge";
+
+    var $options := {
+       <commit-options> {
+		   <synchronize>;
+           <log> "Autokonfiguracja podinterfejsow: " _ $interface _ " VLAN od " _ $minimum _ " do " _ $maximum;
+        }
+    }
+
+    var $conn_handle = jcs:open();
+
+    var $results := { 
+      call jcs:load-configuration( $action=$load-action, $commit-options=$options, $configuration=$config-changes, $connection=$conn_handle); 
+    }
+	if (results//xnm:error) {
+		for-each ($disable-results//xnm:error) {
+			<output> message;
+		}
+	}
+	else {
+		<output> "DONE";
+	}
+	
+    var $close-results = jcs:close($conn_handle);
+    }
+}
