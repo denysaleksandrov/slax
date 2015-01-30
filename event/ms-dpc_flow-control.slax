@@ -1,0 +1,182 @@
+version 1.0;
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+
+import "../import/junos.xsl";
+
+var $arguments = {
+    <argument> {
+        <name> "message";
+        <description> "Stream Block Message";
+    }
+}
+
+param $message;
+/*
+ * Open connection with mgd
+ */
+var $con = jcs:open();
+
+
+match / {
+    <event-script-results> {
+        if (not($con)) {
+            expr jcs:syslog("daemon.error", "corrective-action: **SCRIPT FAIL** Not able to connect to local mgd");
+        }
+        else {
+            var $re_status = { call is_master(); }
+            /*
+            * only run this script on the master RE
+            */
+            if ($re_status == "master") {
+                var $input = jcs:regex("sp-([0-9]+)/([0-3])", $message);
+
+                /* from the info we have find out the fpc and pic locations */
+                var $fpc = $input[2];
+                var $pic = $input[3];
+                /* expr jcs:syslog("daemon.error", "FPC ", $fpc, " and PIC ", $pic, "matched"); */
+                <output> "Command 1\n\n";
+                var $command-1-rpc = <request-pfe-execute> {
+                            <pic-slot> $pic;
+                            <target> "fpc" _ $fpc;
+                            <command> "show sg mac";
+                        }
+                var $command-1-output = jcs:execute($con, $command-1-rpc);
+                copy-of $command-1-output;
+                <output> "Command 2\n\n";
+                var $command-2-rpc = <request-pfe-execute> {
+                            <pic-slot> $pic;
+                            <target> "fpc" _ $fpc;
+                            <command> "show sg mac spi4";
+                        }
+                var $command-2-output = jcs:execute($con, $command-2-rpc);
+                copy-of $command-2-output;
+                <output> "Command 3\n\n";
+                                var $command-3-rpc = <request-pfe-execute> {
+                            <pic-slot> $pic;
+                            <target> "fpc" _ $fpc;
+                            <command> "show sg mac spi4 status";
+                        }
+                var $command-3-output = jcs:execute($con, $command-3-rpc);
+                copy-of $command-3-output;
+                <output> "Command 4\n\n";
+                var $command-4-rpc = <request-pfe-execute> {
+                            <pic-slot> $pic;
+                            <target> "fpc" _ $fpc;
+                            <command> "show sg fmn mac buckets";
+                        }
+                var $command-4-output = jcs:execute($con, $command-4-rpc);
+                copy-of $command-4-output;
+                <output> "Command 5\n\n";
+                var $command-5-rpc = <request-pfe-execute> {
+                            <pic-slot> $pic;
+                            <target> "fpc" _ $fpc;
+                            <command> "show sg fmn mac credits";
+                        }
+                var $command-5-output = jcs:execute($con, $command-5-rpc);
+                copy-of $command-5-output;
+                <output> "Command 6\n\n";
+                var $command-6-rpc = <request-pfe-execute> {
+                            <target> "fpc" _ $fpc;
+                            <command> "show sdpc-pic " _ $pic _ " fpga counter";
+                        }
+                var $command-6-output = jcs:execute($con, $command-6-rpc);
+                copy-of $command-6-output;
+                <output> "Command 7\n\n";
+                var $command-7-rpc = <request-pfe-execute> {
+                            <target> "fpc" _ $fpc;
+                            <command> "show sdpc-pic " _ $pic _ " health-status";
+                        }
+                var $command-7-output = jcs:execute($con, $command-7-rpc);
+                copy-of $command-7-output;
+                <output> "Command 8\n\n";
+                var $command-8-rpc = <request-pfe-execute> {
+                            <target> "fpc" _ $fpc;
+                            <command> "show sdpc-pic " _ $pic _ " fc";
+                        }
+                var $command-8-output = jcs:execute($con, $command-8-rpc);
+                copy-of $command-8-output;
+                <output> "Command 9\n\n";
+                var $command-9-rpc = <request-pfe-execute> {
+                            <target> "fpc" _ $fpc;
+                            <command> "show sdpc-pic " _ $pic _ " fpga rpe";
+                        }
+                var $command-9-output = jcs:execute($con, $command-9-rpc);
+                copy-of $command-9-output;
+                <output> "Command 10\n\n";
+                var $command-10-rpc = <request-pfe-execute> {
+                            <target> "fpc" _ $fpc;
+                            <command> "show sdpc-pic " _ $pic _ " fpga tpe";
+                        }
+                                var $command-10-output = jcs:execute($con, $command-10-rpc);
+                copy-of $command-10-output;
+                <output> "Command 11\n\n";
+                var $command-11-rpc = <request-pfe-execute> {
+                                                        <pic-slot> $pic;
+                            <target> "fpc" _ $fpc;
+                            <command> "show sg mac pde";
+                        }
+                var $command-11-output = jcs:execute($con, $command-11-rpc);
+                copy-of $command-11-output;
+                <output> "Command 12\n\n";
+                var $command-12-rpc = <request-pfe-execute> {
+                                                        <pic-slot> $pic;
+                            <target> "fpc" _ $fpc;
+                            <command> "show sg ctrl";
+                        }
+                var $command-12-output = jcs:execute($con, $command-12-rpc);
+                copy-of $command-12-output;
+                <output> "Command 13\n\n";
+                var $command-13-rpc = <request-pfe-execute> {
+                                                        <pic-slot> $pic;
+                            <target> "fpc" _ $fpc;
+                            <command> "show sg ctrl mpool";
+                        }
+                var $command-13-output = jcs:execute($con, $command-13-rpc);
+                copy-of $command-13-output;
+                <output> "Command 14\n\n";
+                var $command-14-rpc = <request-pfe-execute> {
+                                                        <pic-slot> $pic;
+                            <target> "fpc" _ $fpc;
+                            <command> "show arena";
+                        }
+                var $command-14-output = jcs:execute($con, $command-14-rpc);
+                copy-of $command-14-output;
+                <output> "Command 15\n\n";
+                var $command-15-rpc = <request-pfe-execute> {
+                                                        <pic-slot> $pic;
+                            <target> "fpc" _ $fpc;
+                            <command> "write coredump";
+                        }
+                var $command-15-output = jcs:execute($con, $command-15-rpc);
+                copy-of $command-15-output;
+
+                /* expr jcs:sleep(120); */
+
+
+            }
+            else {
+                expr jcs:syslog("daemon.info", "corrective-action: not master so nothing to do");
+            }
+    }
+}
+}
+template is_master() {
+    var $re = jcs:invoke("get-route-engine-information");
+
+        /*
+     * if there is only one RE then is has to be master
+     */
+    if (count($re/route-engine) == 1) {
+        <output> "master";
+    }
+    /* if there is more than one RE this XPath statement is only true on the master RE */
+    else if ($re/route-engine[mastership-state == "master"]/load-average-one) {
+        <output> "master";
+    }
+    else {
+        <output> "backup";
+    }
+}
