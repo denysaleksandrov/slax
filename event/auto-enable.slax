@@ -1,0 +1,84 @@
+/*
+ * This event script will automatically remove a disable statement from a unit 0
+ * logical interface after receiving a SNMP_TRAP_LINK_UP for the physical link.
+ *
+ * Minimum JUNOS version is 9.3. 
+*/
+
+version 1.0;
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+
+import "../import/junos.xsl";
+
+/* The embedded event policy */
+var $event-definition = {
+    <event-options> {
+        <policy> {
+            <name> "auto-enable";
+            <events> "SNMP_TRAP_LINK_UP";
+            <then> {
+                <event-script> {
+                    <name> "auto-enable.slax";
+                }
+            }
+        }
+    }
+}
+
+match / {
+    
+    /* Retrieve the interface that just came up */
+    var $ifName = event-script-input/trigger-event/attribute-list/attribute[name=="interface-name"]/value;
+
+    /* Retrieve the current committed configuration with full inheritance */    
+    var $configuration-rpc = {
+        <get-configuration database="committed" inherit="inherit">;
+            <configuration> {
+                <interfaces>;
+            }
+    }
+    
+    /* Open connection to get config as well as load it */
+    var $connection = jcs:open();
+    var $configuration = jcs:execute( $connection, $configuration-rpc );
+    
+    /* If the logical interface is currently disabled, remove the disable statement */
+    if( $configuration/interfaces/interface[name==$ifName]/unit[name=="0"]/disable ) {
+        
+        /* Create the configuration change */
+        var $change = {
+            <configuration> {
+                <interfaces> {
+                    <interface> {
+                        <name> $ifName;
+                        <unit> {
+                            <name> "0";
+                            <disable delete="delete">;
+                        }
+                    }
+                }
+            }
+        }
+        
+        /* Pass the configuration change to jcs:load-configuration */
+        var $results := { call jcs:load-configuration( $connection, $configuration=$change ); }
+        
+        /* Report on errors or success... */
+        if( $results//xnm:error ) {
+            for-each( $results//xnm:error ) {
+                expr jcs:syslog( "external.error", "Commit Error: ", message ); 
+            }
+        }
+        else {
+            expr jcs:syslog( "external.info", "Logical interface ", $ifName, ".0 automatically enabled." );
+        }
+    }
+    
+    /* Close the connection */
+    expr jcs:close( $connection );
+}
+
+

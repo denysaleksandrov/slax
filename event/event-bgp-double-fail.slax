@@ -1,0 +1,431 @@
+version 1.0;   /* XML version not script version */
+
+ /*
+ * Copyright (c) 2014, Juniper Networks, Inc.
+ * All rights reserved.
+ * Filename      : event-bgp-double-fail.slax
+ * Author        : Andre Stiphout <andre@juniper.net>
+ * Platform      : MX TRIO
+ * Release       : Junos 12.3+
+ * Version       : 1.0
+ * Date          : 2014-08-17 18:00
+ * Description   : Detect double iBGP failure and shutdown CE-FW links
+ *
+ */
+
+/*
+ * The purpose of the script is to be called by an event-policy when certain BGP Sessions fail;
+ * a minimum of a single BGP session and a single interface-to-be-shutdown must be passed to the script;
+ * a maximum of 2 BGP sessions and 2 interfaces-to-be-shutdown can be passed to the script.
+ * The script covers both failure and restoration scenarios; the goal of the solution is to provide
+ * a workaroud for the following setup, where the script runs on CE1 and/or CE2 and the FW is a
+ * clustered solution, but without any protocols active between the FW and the CEx:
+ *
+ *   PE1 ---- PE2
+ *    |        |
+ *   CE1 ---- CE2
+ *    |        |
+ *     -- FW --
+ *
+ * Assuming all traffic will use CE1 due to VRRP preference via the IRB on CE1-CE2 trunk, when both
+ * BGP sessions fail (CE1-PE1 and CE1-CE2), the script will shutdown the interface CE1-FW;
+ * when either PE1-CE1 or CE1-CE2 BGP session recovers, the CE1-FW link is re-enabled.
+ *
+ * Note that only CE1-CE2 BGP session recovery infers that CE1-CE2 trunk is up and VRRP can pass again:
+ * if just PE1-CE1 recovers and not CE1-CE2, both CE1 and CE2 will be VRRP master -> disaster.
+ *
+ * There are no version dependencies.
+ *
+ *  v1.0   Initial release.
+ */
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+ns ext = "http://xmlsoft.org/XSLT/namespace";
+ns math = "http://exslt.org/math";
+
+import "../import/junos.xsl";
+
+/* This is imported into the Junos CLI help text */
+var $arguments = {
+    <argument> {
+        <name> "bgpNeighbor1";
+        <description> "BGP neighbor 1 address";
+    }
+    <argument> {
+        <name> "bgpNeighbor2";
+        <description> "BGP neighbor 2 address";
+    }
+    <argument> {
+        <name> "linkAdminState1";
+        <description> "ifd of link 1 to change AdminState";
+    }
+    <argument> {
+        <name> "linkAdminState2";
+        <description> "ifd of link 2 to change AdminState";
+    }
+    <argument> {
+        <name> "syslogEvent";
+        <description> "syslog message to emit: leave empty it not needed";
+    }
+    <argument> {
+        <name> "emitTrap";
+        <description> "send trap with contents of syslogMessage: yes or no";
+    }
+    <argument> {
+        <name> "direction";
+        <description> "either: Up->Down or Down->Up";
+    }
+}
+
+param $bgpNeighbor1;
+param $bgpNeighbor2;
+param $linkAdminState1;
+param $linkAdminState2;
+param $syslogEvent;
+param $emitTrap;
+param $direction;
+
+/* open connection to mgd so we can get the data we need */
+var $mgd = jcs:open();
+
+match / {
+	<event-script-results> {
+
+        /* abort if no connection to local mgd */
+        if ( $mgd/..//xnm:error ) {
+            call rpcFailure( $rpc = $mgd/.., $message = "Error connecting on mgd on this RE" );
+            <xsl:message terminate="yes"> ;
+        }
+
+        /* retrieve the hostname context */
+        var $hostname = $junos-context/hostname;
+
+        /* if both variables are empty, error and exit */
+        if ( jcs:empty( $bgpNeighbor1 ) and ( jcs:empty( $bgpNeighbor2 ))) {
+            expr jcs:syslog( "daemon.notice", $script _ ": no failing bgp Neighbor, passed to script" );
+            <xsl:message terminate="yes"> ;
+        }
+        /* if only the first variable is empty, error and exit */
+        else if ( jcs:empty( $bgpNeighbor1 ) and ( not ( jcs:empty( $bgpNeighbor2 )))) {
+            expr jcs:syslog( "daemon.notice", $script _ ": if only the 1 bgp Neighbor, use $bgpNeighbor1" );
+            <xsl:message terminate="yes"> ;
+        }
+
+        /* if both variables are empty, error and exit */
+        if ( jcs:empty( $linkAdminState1 ) and ( jcs:empty( $linkAdminState2 ))) {
+            expr jcs:syslog( "daemon.notice", $script _ ": no link to shutdown, passed to script" );
+            <xsl:message terminate="yes"> ;
+        }
+        /* if only the first variable is empty, error and exit */
+        else if ( jcs:empty( $linkAdminState1 ) and (not ( jcs:empty( $linkAdminState2 )))) {
+            expr jcs:syslog( "daemon.notice", $script _ ": if only 1 link to shutdown, use $linkAdminState1" );
+            <xsl:message terminate="yes"> ;
+        }
+
+        /* retrieve RE status */
+        var $reStatus = { call checkMaster(); }
+
+        /* if this RE is master, continue */
+        if ( $reStatus == "master" ) {
+
+            /* retrieve the BGP state of both peers */
+            var $bgpNeighbor1State = { call getBgpState( $bgpNeighbor = $bgpNeighbor1 ); }
+
+            var $bgpNeighbor2State = { call getBgpState( $bgpNeighbor = $bgpNeighbor2 ); }
+
+            /* if both peers are no longer Established the script is triggered to handle failure scenario */
+            if (( $bgpNeighbor1State != "Established" ) and ( $bgpNeighbor2State != "Established" ) and ( $direction == "Up->Down" )) {
+
+                /* retrieve the BGP state of both peers again afer 10 seconds */
+                expr jcs:sleep( 10 );
+
+                var $bgpNeighbor1StateRenew = { call getBgpState( $bgpNeighbor = $bgpNeighbor1 ); }
+
+                var $bgpNeighbor2StateRenew = { call getBgpState( $bgpNeighbor = $bgpNeighbor2 ); }
+
+                /* if both peers are still not Established, disable the interfaces */
+                if (( $bgpNeighbor1StateRenew != "Established" ) and ( $bgpNeighbor2StateRenew != "Established" )) {
+
+                    call commitConfiguration( $ifd1 = $linkAdminState1, $ifd2 = $linkAdminState2, $adminChange = "disable" );
+
+                }
+            }
+            /* if either one of the BGP peers is still Established, don't do anything, but it is still syslog'ed */
+            else if ( $direction = "Up->Down" ) {
+
+                expr jcs:syslog( "daemon.notice", $script _ ": script called for direction " _  $direction _ ", but at least 1 BGP neighbor is up" );
+
+            }
+            /* if either one of the BGP peers is Established and the script is triggered to handle recovery scenario */
+            else if ((( $bgpNeighbor1State == "Established" ) or ( $bgpNeighbor2State == "Established" )) and ( $direction == "Down->Up" )) {
+
+                /* retrieve the BGP state of both peers again afer 30 seconds */
+                expr jcs:sleep( 30 );
+
+                var $bgpNeighbor1StateRenew = { call getBgpState( $bgpNeighbor = $bgpNeighbor1 ); }
+
+                var $bgpNeighbor2StateRenew = { call getBgpState( $bgpNeighbor = $bgpNeighbor2 ); }
+
+                /* if either one of the BGP peers is Established, enable the interfaces */
+                if (( $bgpNeighbor1StateRenew == "Established" ) or ( $bgpNeighbor2StateRenew == "Established" )) {
+
+                    call commitConfiguration( $ifd1 = $linkAdminState1, $ifd2 = $linkAdminState2, $adminChange = "enable" );
+
+                }
+            }
+		}
+	}
+
+    /* closes the connection handle */
+    expr jcs:close( $mgd );
+}
+
+template getBgpState( $bgpNeighbor ) {
+
+    /* each peer is assumed Idle until proven otherwise */
+    /* closes the connection handle */
+    expr jcs:close( $mgd );
+    mvar $bgpNeighborState = "Idle";
+
+    if ( not ( jcs:empty( $bgpNeighbor ))) {
+
+        var $getBgpNeighborInfo = <get-bgp-neighbor-information> {
+            <neighbor-address> $bgpNeighbor;
+        }
+        var $bgpNeighborInfo = jcs:execute( $mgd, $getBgpNeighborInfo );
+
+        /* change the variable if the bgpNeighborState is Established */
+        if ( $bgpNeighborInfo/..//xnm:error ) {
+
+            call rpcFailure( $rpc = $bgpNeighborInfo/.., $message = $script _ ": error on show bgp neighbor for : " _ $bgpNeighbor );
+
+        } else if ( $bgpNeighborInfo/bgp-peer/peer-state == "Established" ) {
+
+            set $bgpNeighborState = "Established";
+
+        }
+    }
+
+    /* return the variable to the calling routine */
+    copy-of $bgpNeighborState;
+
+}
+
+template commitConfiguration( $ifd1, $ifd2, $adminChange, $commitAttempt = 1 ) {
+
+    /* based on the adminChange the interface is enabled or disabled */
+    var $xmlUpdate = {
+        <configuration> {
+            <interfaces> {
+                <interface> {
+                    if ( $adminChange == "disable" ) {
+                        <name> $ifd1;
+                        <disable>;
+                    } else if ( $adminChange == "enable" ) {
+                        <name> $ifd1;
+                        <disable delete="disable">;
+                    }
+                    /* an additional change is made if a second interface is provided as input */
+                    if ( not ( jcs:empty( $ifd2 )) and ( $adminChange == "disable" )) {
+                        <name> $ifd2;
+                        <disable>;
+                    } else if ( not ( jcs:empty( $ifd2 )) and ( $adminChange == "enable" )) {
+                        <name> $ifd2;
+                        <disable delete="disable">;
+                    }
+                }
+            }
+        }
+    }
+
+    var $commitOptions := {
+        <commit-options> {
+            <force-synchronize>;
+            <log> "Event-script commit due to " _ $adminChange _ " of interface " _ $ifd1;
+        }
+    }
+
+    /* Discard any changes made by other users; configuration is not locked,
+       there is a chance that users apply a configuration between this RPC
+       and the subsequent actual commit, but with multiple attemps this
+       is highly likely to succeed; possible errors are unlikely and not checked;
+       unfortunately we cannot sent a message to all users about the rollback.
+    */
+    var $rollbackNull = <load-configuration rollback="0">;
+    var $rollbackResult := jcs:execute( $mgd, $rollbackNull );
+
+    /* script sleeps between 0 and 1s in case 2 bgpNeighbors go down in quick succession */
+    expr jcs:sleep( math:random());
+
+    /* load and commit the change */
+    var $loadResult := {
+        call jcs:load-configuration( $connection = $mgd, $configuration = $xmlUpdate, $load-action = "merge", $commit-options = $commitOptions );
+    }
+
+    /* If any errors occurred during the commit process then report them to syslog */
+    if( $loadResult//self::xnm:error ) {
+        for-each( $loadResult//self::xnm:error ) {
+            expr jcs:syslog( "external.alert", "Error when disabling CE uplinks " _ $hostname _ ": " _ message _ " attempt " _ $commitAttempt _ " of 3." );
+        }
+
+        /* 3 commits are attempted */
+        if ( $commitAttempt < 3 ) {
+
+            /* between commit attempts we wait 3s */
+            expr jcs:sleep( 3 );
+
+            call commitConfiguration( $ifd1, $ifd2, $adminChange, $commitAttempt = $commitAttempt + 1 );
+        }
+    }
+    else {
+
+        /* if there is a syslogEvent, syslog the event */
+        if ( not ( jcs:empty( $syslogEvent ))) {
+
+            var $facilitySeverity = "daemon.crit";
+
+            expr jcs:syslog( $facilitySeverity, $syslogEvent );
+
+            /* if a snmp-trap is requisted, take the syslogEvent and snmpTrap it after parsing it */
+            if ( $emitTrap == "yes" ) {
+
+                call snmpTrap( $message = $syslogEvent );
+
+            }
+        }
+    }
+}
+
+template snmpTrap( $message ) {
+
+    /* trapm utilty wants the following characters in the value to be escaped: '[', ']', ' ', '=', and ',' */
+    var $messageEscaped = { call escapeString( $text = $message, $vector = '[] =,' ); }
+
+    var $requestSnmpTrap = <request-snmp-spoof-trap> {
+         <trap> "jnxEventTrap";
+         <variable-bindings>
+        "jnxEventTrapDescr[0]='Event-Trap' , " _
+        "jnxEventAvAttribute[1]='event' , " _
+        "jnxEventAvValue[1]='" _ $junos-context/hostname _ ":\\ " _ $messageEscaped _ "'";
+    }
+    var $snmpTrapResults = jcs:invoke( $requestSnmpTrap );
+
+    /* report on snmp-trap-error, otherwise log success */
+    if ( $snmpTrapResults/..//xnm:error ) {
+
+        expr jcs:syslog( "daemon.notice", $script _ ": unsuccesfull snmp-trap" );
+
+    }
+}
+
+template escapeString( $text, $vector ) {
+
+    /* once the vector is empty all escape-values have been processed */
+    if ( jcs:empty( $vector )) {
+
+        expr $text;
+
+    } else {
+
+        /* the first escape-value from the vector */
+        var $index = 1;
+        var $length = 1;
+        var $escapeValue = substring( $vector, $index, $length );
+
+        /* call replaceString template with the entire string ($text), $escapeValue and $processedValue */
+        var $changedValue = {
+            call replaceString( $text, $escapeValue ) {
+                with $processedValue = {
+                    /* escape characters */
+                    expr "\\";
+                    expr $escapeValue;
+                }
+            }
+        }
+
+        /* use recursion to process the updated string ($changedValue) with the next escape-value */
+        call escapeString( $text = $changedValue, $vector = substring( $vector, $index + 1 )); 
+    }
+}
+
+template replaceString( $text, $escapeValue, $processedValue ) {
+
+    /* if the remainder of $text conains the $escapeValue process it, otherwise return the remainder */
+    if ( contains( $text, $escapeValue )) {
+
+        /* split the string between before and after the escape-value */
+        var $beforeString = substring-before( $text, $escapeValue );
+        var $afterString = substring-after( $text, $escapeValue );
+
+        /* return the $beforeString followed by the fully escaped value */
+        expr $beforeString _ $processedValue;
+
+        /* use recursion to process the remainder of the string ($afterString) */
+        call replaceString( $text = $afterString, $escapeValue, $processedValue );
+
+    } else {
+        expr $text;
+    }
+}
+
+template checkMaster() {
+
+    /* master-state is available natively when querying junos-context */
+    if ( $junos-context ) {
+        if ( $junos-context/re-master ) {
+          <output> "master";
+        }
+        else {
+           <output> "backup";
+        }
+    }
+    /* if not available, other means are used to determine mastership */
+    else {
+
+        var $getReInfo = <get-route-engine-information> ;
+        var $reInfo = jcs:execute( $mgd, $getReInfo );
+
+        if ( $reInfo/..//xnm:error ) {
+            call rpcFailure( $rpc = $reInfo/.., $message = $script _ ": error communicating to determine if master" );
+            <xsl:message terminate="yes"> ;
+        }
+
+        /* if there is only one RE then it has to be master */
+        if ( $reInfo/route-engine ) {
+            if ( count( $reInfo/route-engine ) == 1 ) {
+                <output> "master";
+            } else {
+
+                /* this command only works on master RE with MX chassis */
+                var $getChassisInfo = <get-chassis-inventory> ;
+                var $chassisInfo = jcs:execute( $mgd, $getChassisInfo );
+
+                if ($chassisInfo/..//xnm:error) { 
+                    call rpcFailure( $rpc = $reInfo/.., $message = $script _ ": error getting Chassis information." );
+                    <xsl:message terminate="yes"> ;
+                }
+
+                if ( $chassisInfo/chassis/serial-number ) {
+                    <output> "master";
+                } else {
+                    <output> "backup";
+                }
+            }
+        } else {
+            expr jcs:syslog( "daemon.error", $script _ ": ERROR, Unexpected response: " _ $reInfo );
+            <xsl:message terminate="yes">;
+        }
+    }
+}
+
+template rpcFailure($rpc, $message = "Following errors occured while trying to gather data: ") {
+
+    expr jcs:syslog( "daemon.crit", $message );
+
+    for-each ( $rpc//xnm:error ) {
+        expr jcs:syslog( "daemon.crit", message );
+    }
+}
+                var $getChassisInfo = <get-chassis-inventory> ;

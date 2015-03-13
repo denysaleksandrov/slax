@@ -1,0 +1,295 @@
+version 1.0;   /* XML version not script version */
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+ns ext = "http://xmlsoft.org/XSLT/namespace";
+ns math = "http://exslt.org/math";
+
+import "../import/junos.xsl";
+
+
+/* This is imported into the Junos CLI help text */
+var $arguments = {
+    <argument> {
+        <name> "bgpNeighbor";
+        <description> "BGP neighbor address";
+    }
+    <argument> {
+        <name> "dnsFile";
+        <description> "output of DNS query triggered by event policy";
+    }
+    <argument> {
+        <name> "static-route";
+        <description> "static route to DNS server to be deactivated in case it active and iBGP session is down";    
+    }
+}
+
+param $bgpNeighbor;
+param $dnsFile;
+param $static-route;
+
+/* open connection to mgd so we can get the data we need */
+var $mgd = jcs:open();
+
+match / {
+	<event-script-results> {
+
+        /* abort if no connection to local mgd */
+        if ( $mgd/..//xnm:error ) {
+            call rpcFailure( $rpc = $mgd/.., $message = "Error connecting on mgd on this RE" );
+            <xsl:message terminate="yes"> ;
+        }
+
+        /* if bgpNeighbor variables is empty, error and exit */
+        if ( jcs:empty( $bgpNeighbor ) ) {
+            expr jcs:syslog( "daemon.notice", $script _ ": no failing bgp Neighbor, passed to script" );
+            <xsl:message terminate="yes"> ;
+        }
+
+        /* retrieve RE status */
+        var $reStatus = { call checkMaster(); }
+
+        /* 
+        * intialize the boolean varaible to check if we have to delete routes, by default
+        * the value is "False", which means the script will not do any changes
+        */
+        mvar $delRoutes = false();
+
+        /* if this RE is master, continue */
+        if ( $reStatus == "master" ) {
+
+            /* sleep 5 sec in order to guarantee dns_output file generateion */
+            expr jcs:sleep( 5 );
+
+            /* retrieve the BGP state of both peers */
+            var $bgpNeighborState = { call getBgpState( $bgpNeighbor = $bgpNeighbor ); }
+            
+            /* 
+            * if the BGP state not Established, which is supposed, then check dns_output file
+            */
+            if (( $bgpNeighborState != "Established" )) {
+                
+                /* get the file from the /var/tmp dir */
+                var $rpc = <file-get> {
+                    <filename> $dnsFile;
+                    <encoding> "ascii";
+                }
+
+                var $dnsOutput = jcs:execute( $mgd, $rpc );
+                /* stop the script if the file either doesn't exist or we can't open it(lack of permission, etc) */
+                if ( $dnsOutput//self::xnm:error ) {
+                    call rpcFailure( $rpc = $dnsOutput/.., $message = $script _ ": Unable to open file : " _ $dnsFile );
+                    <xsl:message terminate="yes"> ;
+                }
+    
+                var $dnsOutputData = jcs:break-lines( $dnsOutput/file-contents );
+                
+                /*
+                * check content of the file line by line if any line(if our case the first one) contains ";;"
+                * we set delRoutes to "True" as this means that dns query failed and DNS server either
+                * unreachable or DNS service doens't work
+                * in case we use "host <fqdn> <server_ip>" we expect:
+                * 1) ";; connection timed out; no servers could be reached" - for unsuccesful query
+                * 2) sucessful query(doens't contain ;;) 
+                *    cat dns_output
+                *   Using domain server:
+                *   Name: 172.29.143.60
+                *   Address: 172.29.143.60#53
+                *   Aliases:
+                *
+                *  google.com has address 216.58.208.46
+                *  google.com has IPv6 address 2a00:1450:4009:80d::200e
+                *  google.com mail is handled by 30 alt2.aspmx.l.google.com.
+                *  google.com mail is handled by 20 alt1.aspmx.l.google.com.
+                *  google.com mail is handled by 50 alt4.aspmx.l.google.com.
+                *  google.com mail is handled by 10 aspmx.l.google.com.
+                *  google.com mail is handled by 40 alt3.aspmx.l.google.com.
+                *
+                * Keep in mind that you should check the output of the command beofre each software upgrade.
+                * 
+                */
+                for-each( $dnsOutput/* ) {
+                    var $line = .;
+                    if ( contains( $line, ";;" )) {
+                        set $delRoutes = true();
+                    }
+                }
+                
+                /* So if True we deactivate static /24 route pointing to the iBGP neighbor 
+                * NOTE: deactivate only if True and route is active currently
+                */
+                if ( $delRoutes ) {
+                    
+                    expr jcs:syslog( "external.warn", $script _ ": DNS is down, check if the route is active, if so deactivate it. ");
+
+                    /* Get the current committed configuration */
+                    var $get-config-rpc =  <get-configuration database="committed"> {
+                                             <configuration> {
+                                               <routing-instances> {
+                                                 <instance> {
+                                                   <name> "edge"; 
+                                                   <routing-options>;
+                                                 }
+                                               }                                    
+                                             }
+                                           }
+                    var $configuration = jcs:execute( $mgd, $get-config-rpc );
+                    /* Error Check, syslog any present errors and close the script */
+                    if( $configuration/..//xnm:error ) {
+                        call rpcFailure( $rpc = $configuration/.., $message = $script _ ": had an error loading the configuration." );
+                        <xsl:message terminate="yes"> "Halting due to error loading the configuration.";
+
+                    }    
+
+                    var $static = $configuration//static;
+                    var $inactive = $static/route[name == $static-route]/@inactive;
+                    if ( jcs:empty( $inactive )) {
+                        call commitConfiguration( );                       
+                    }
+                    else {
+                        expr jcs:syslog( "daemon.info", $script _ ": Nothing to commit, route is already inactive " );
+                        <xsl:message terminate="yes">;
+                    }
+                }
+                else {
+                    expr jcs:syslog( "external.warn", $script _ ": DNS is alive, just halt the script ");
+                }
+            }
+        }
+    }       
+
+    /* closes the connection handle */
+    expr jcs:close( $mgd );
+}
+
+template commitConfiguration( $commitAttempt = 1 ) {
+    var $changes = {
+        <configuration> {
+            <routing-instances> {
+                <instance> {
+                    <name> "edge"; 
+                    <routing-options> {
+                        <static> {
+                            <route inactive="inactive"> {
+                                <name> $static-route;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    var $loadResult := {
+        call jcs:load-configuration( $connection = $mgd, $configuration = $changes, $load-action = "merge" );
+    }
+
+    /* If any errors occurred during the commit process then report them to syslog */
+    if( $loadResult//self::xnm:error ) {
+        for-each( $loadResult//self::xnm:error ) {
+            expr jcs:syslog( "daemon.error", $script _ ": Error when script deativated route " _ $static-route _ ": " _ message _ " attempt " _ $commitAttempt _ " of 3." );
+        }
+
+        /* 3 commits are attempted */
+        if ( $commitAttempt < 3 ) {
+
+            /* between commit attempts we wait 3s */
+            expr jcs:sleep( 3 );
+
+            call commitConfiguration( $commitAttempt = $commitAttempt + 1 );
+        }
+    }
+    else {
+        expr jcs:syslog( "daemon.info", $script _ ": Route deactivated sucessfuly. Event script is exiting. " );
+    }
+}
+
+template getBgpState( $bgpNeighbor ) {
+
+    /* each peer is assumed Idle until proven otherwise */
+    mvar $bgpNeighborState = "Idle";
+
+    if ( not ( jcs:empty( $bgpNeighbor ))) {
+
+        var $getBgpNeighborInfo = <get-bgp-neighbor-information> {
+            <neighbor-address> $bgpNeighbor;
+        }
+        var $bgpNeighborInfo = jcs:execute( $mgd, $getBgpNeighborInfo );
+
+        /* change the variable if the bgpNeighborState is Established */
+        if ( $bgpNeighborInfo/..//xnm:error ) {
+
+            call rpcFailure( $rpc = $bgpNeighborInfo/.., $message = $script _ ": error on show bgp neighbor for : " _ $bgpNeighbor );
+
+        } else if ( $bgpNeighborInfo/bgp-peer/peer-state == "Established" ) {
+
+            set $bgpNeighborState = "Established";
+
+        }
+    }
+
+    /* return the variable to the calling routine */
+    copy-of $bgpNeighborState;
+
+}
+
+template checkMaster() {
+
+    /* master-state is available natively when querying junos-context */
+    if ( $junos-context ) {
+        if ( $junos-context/re-master ) {
+          <output> "master";
+        }
+        else {
+           <output> "backup";
+        }
+    }
+    /* if not available, other means are used to determine mastership */
+    else {
+
+        var $getReInfo = <get-route-engine-information> ;
+        var $reInfo = jcs:execute( $mgd, $getReInfo );
+
+        if ( $reInfo/..//xnm:error ) {
+            call rpcFailure( $rpc = $reInfo/.., $message = $script _ ": error communicating to determine if master" );
+            <xsl:message terminate="yes"> ;
+        }
+
+        /* if there is only one RE then it has to be master */
+        if ( $reInfo/route-engine ) {
+            if ( count( $reInfo/route-engine ) == 1 ) {
+                <output> "master";
+            } else {
+
+                /* this command only works on master RE with MX chassis */
+                var $getChassisInfo = <get-chassis-inventory> ;
+                var $chassisInfo = jcs:execute( $mgd, $getChassisInfo );
+
+                if ($chassisInfo/..//xnm:error) { 
+                    call rpcFailure( $rpc = $reInfo/.., $message = $script _ ": error getting Chassis information." );
+                    <xsl:message terminate="yes"> ;
+                }
+
+                if ( $chassisInfo/chassis/serial-number ) {
+                    <output> "master";
+                } else {
+                    <output> "backup";
+                }
+            }
+        } else {
+            expr jcs:syslog( "daemon.error", $script _ ": ERROR, Unexpected response: " _ $reInfo );
+            <xsl:message terminate="yes">;
+        }
+    }
+}
+
+
+template rpcFailure($rpc, $message = "Following errors occured while trying to gather data: ") {
+
+    expr jcs:syslog( "daemon.crit", $message );
+
+    for-each ( $rpc//xnm:error ) {
+        expr jcs:syslog( "daemon.crit", message );
+    }
+}
