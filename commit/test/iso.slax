@@ -8,9 +8,9 @@ ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
 import "../import/junos.xsl"; 
 
 match configuration {
-    var $macro = "test";
+    var $macro = "families";
     /* Loop through all logical interfaces */ 
-    for-each (interfaces/interface/unit/apply-macro[ name == $macro ] ) {
+    for-each (interfaces/interface/apply-macro[ name == $macro ] ) {
         /* Assing to varaibles. */
         var $af1 = data[name=="af1"]/value;
         var $af2 = data[name=="af2"]/value;
@@ -24,13 +24,32 @@ match configuration {
             }
         }
         else {
+            <xmn:warning> {
+                call jcs:edit-path();
+                <message> {
+                    <xsl:text> "Somthing should be applied";
+                }
+            }
             call jcs:emit-change() {
                 with $dot = ..;
                 with $content= {
                     <mtu> $mtu;
-                    <family> {
-                        <mpls>;
-                        <iso>;
+                }
+            }
+            for-each (../unit) {
+                <xmn:warning> {
+                    call jcs:edit-path();
+                    <message> {
+                        <xsl:text> "unit";
+                    }
+                }
+                call jcs:emit-change() {
+                    with $dot = .;
+                    with $content= {
+                        <family> {
+                            <mpls>;
+                            <iso>;
+                        }
                     }
                 }
             }
