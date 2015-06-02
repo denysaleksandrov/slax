@@ -1,0 +1,67 @@
+version 1.0;
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+
+import "../import/junos.xsl";
+/* This is an op script */
+
+param $product;
+param $user;
+param $hostname;
+param $localtime;
+param $localtime_iso;
+param $script;
+
+match / {
+    <op-script-results> {
+        expr jcs:progress("Sleeping for 2 seconds before startting the Lab 3");
+        expr jcs:sleep(2);
+        <output>;/* Your script code goes here */
+        <output> "Lab3 -Part 4: Syslog messages using user input";
+        <output>;
+        var $user-input = jcs:get-input("Enter your name: ");
+        var $log-message = "JAUT Log: " _ $user-input _  " was here!";
+        expr jcs:syslog("user.info", $log-message);
+        <output> "Syslog message sent to log file";
+        <output>;
+        <output> "Lab 3 - Part 5: Arguments";
+        <output>;
+        <output> "Jniper Product:   " _ $product;
+        <output> "Username:         " _ $user;
+        <output> "Hostname:         " _ $hostname;
+        <output> "Local Time:       " _ $localtime;
+        <output> "Local Time (ISO): " _ $localtime_iso;
+        <output> "Script Name:      " _ $script;
+        <output>;
+        <output> "Lab 3 - Part 6: Parse IP";
+
+        <output>;
+        var $ipArray = jcs:parse-ip("10.20.30.40/24");
+        var $ipArraySize = count($ipArray);
+        <output> "Number of array members is: " _ $ipArraySize;
+        call print-array($arrayName = "ipArray", $array = $ipArray, $arraySize = $ipArraySize, $count = 1);
+        <output>;
+        <output> "Lab3 - Part 7: Splitting Strings";
+        var $ipOctets = jcs:split(("[.]"), $ipArray);
+        var $ipOctetsSize = count($ipOctets);
+        <output> "Number of array members is : " _ $ipOctetsSize;
+        <output>;
+        call print-array($arrayName = "ipOctets", $array = $ipOctets, $arraySize = $ipOctetsSize, $count = 1);
+        <output>;
+        <output> "Lab3 - Part 8: Customizing Output";
+        <output>;
+        <output> jcs:printf("%s\t%s\t%s\t%s\n", "1st Octet", "2nd Octet", "1rd Octet", "1th Octet");
+        <output> jcs:printf("%d\t\t%d\t\t%d\t\t%d\n", $ipOctets[1], $ipOctets[2], $ipOctets[3], $ipOctets[4]);
+        <output>;
+        <output> "End of lab 3 script";
+
+    }
+}
+
+template print-array($arrayName, $array, $arraySize, $count) {
+    <output> $arrayName _ "[" _ $count _ "] = " _ $array[$count];
+    if ($count < $arraySize) {
+        call print-array($arrayName = $arrayName, $array = $array, $arraySize = $arraySize, $count = $count + 1);
+    }
+}
