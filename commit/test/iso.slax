@@ -7,14 +7,55 @@ ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
 
 import "../import/junos.xsl"; 
 
+template check($protocol) {
+    if (jcs:empty($protocol)) {
+        <xnm:warning> {
+            call jcs:edit-path();
+            <message> "some protocol is missing, please check macro";
+        }
+    }
+}
+
+template prot($interface, $protocol) {
+    <xmn:warning> {
+       call jcs:edit-path();
+       <message> "path";
+    }
+    var $location := {
+        <configuration> {
+            <protocols> {
+                <name> $protocol;
+            }
+        }
+    }
+    call jcs:emit-change {
+        with $dot = $location;
+        with $content = {
+            <interface> {
+                <name> $interface;   
+            }
+        }
+        with $message = $protocol _ " congirued -> " _ $location;
+    }
+}
+
 match configuration {
     var $macro = "families";
     /* Loop through all logical interfaces */ 
     for-each (interfaces/interface/apply-macro[ name == $macro ] ) {
         /* Assing to varaibles. */
+        var $interface = ../name;
         var $af1 = data[name=="af1"]/value;
         var $af2 = data[name=="af2"]/value;
         var $mtu = data[name=="mtu"]/value;
+        var $mpls = data[name=="protocols1"]/value;
+        var $isis= data[name=="protocols2"]/value;
+        var $ldp = data[name=="protocols3"]/value;
+        var $rsvp = data[name=="protocols4"]/value;
+        call check($protocol=$mpls);
+        call check($protocol=$isis);
+        call check($protocol=$ldp);
+        call check($protocol=$rsvp);
         if(jcs:empty($af1) || jcs:empty($af2) || jcs:empty($mtu)) {
             <xnm:error> {
                 call jcs:edit-path();
@@ -54,6 +95,10 @@ match configuration {
                 }
             }
         }
+        call prot($interface=$interface, $protocol=$mpls);
+        call prot($interface=$interface, $protocol=$isis);
+        call prot($interface=$interface, $protocol=$ldp);
+        call prot($interface=$interface, $protocol=$rsvp);
     }
 } 
 
