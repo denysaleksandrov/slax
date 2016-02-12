@@ -1,0 +1,163 @@
+version 1.0;   /* XML version not script version */
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+ns ext = "http://xmlsoft.org/XSLT/namespace";
+ns math = "http://exslt.org/math";
+
+import "../import/junos.xsl";
+
+/* open connection to mgd so we can get the data we need */
+var $mgd = jcs:open();
+
+match / {
+	<event-script-results> {
+
+        /* abort if no connection to local mgd */
+        if ( $mgd/..//xnm:error ) {
+            call rpcFailure( $rpc = $mgd/.., $message = "Error connecting on mgd on this RE" );
+            <xsl:message terminate="yes"> ;
+        }
+
+        /* retrieve RE status */
+        var $reStatus = { call checkMaster(); }
+
+        /* if this RE is master, continue */
+        if ( $reStatus == "master" ) {
+
+            expr jcs:syslog( "daemon.info", $script _ ": commiting ");
+
+            call commitConfiguration( );                       
+            /* sleep 20 sec in order to guarantee commit is done*/
+            expr jcs:syslog( "daemon.info", $script _ ": sleeping");
+            expr jcs:sleep( 20 );
+
+            expr jcs:syslog( "daemon.info", $script _ ": clearing");
+            var $l2tp = <clear-l2tp-destination-information> {
+                    <all>;
+            }
+            var $clear-l2tp = jcs:invoke($l2tp);
+            if( $clear-l2tp//self::xnm:error ) {
+                for-each( $results//self::xnm:error ) {
+                    expr jcs:syslog( "daemon.error", $script _ ": Error when script clears l2tp: " _ message);
+                }
+            }
+            var $demux = <clear-auto-configuration-interfaces> {
+                    <interface-name> "demux0";
+            }
+            var $clear-demux = jcs:invoke($demux);
+            if( $clear-demux//self::xnm:error ) {
+                for-each( $results//self::xnm:error ) {
+                    expr jcs:syslog( "daemon.error", $script _ ": Error when script clears demux: " _ message);
+                }
+            }
+            expr jcs:syslog( "daemon.info", $script _ ": done");
+        }
+    }       
+
+    /* closes the connection handle */
+    expr jcs:close( $mgd );
+}
+
+template commitConfiguration( $commitAttempt = 1 ) {
+    var $changes =  {
+        <configuration> {
+            <dynamic-profiles> {
+                <name> "PROF_VLAN_FIRST_PPPOE"; 
+                <interfaces> {
+                    <interface> {
+                        <name> "demux0";
+                        <unit> {
+                            <name> "$junos-interface-unit";
+                            <family> {
+                                <pppoe> {
+                                    <service-name-table> "Drop";
+                                }
+                            }
+                        }
+                    }                                    
+                }
+            }
+        }
+    }
+    
+    var $loadResult := {
+        call jcs:load-configuration( $connection = $mgd, $configuration = $changes, $load-action = "merge" );
+    }
+
+    /* If any errors occurred during the commit process then report them to syslog */
+    if( $loadResult//self::xnm:error ) {
+        for-each( $loadResult//self::xnm:error ) {
+            expr jcs:syslog( "daemon.error", $script _ ": Error when script commiting: " _ message _ " attempt " _ $commitAttempt _ " of 3." );
+        }
+        /* 3 commits are attempted */
+        if ( $commitAttempt < 3 ) {
+
+            /* between commit attempts we wait 3s */
+            expr jcs:sleep( 3 );
+
+            call commitConfiguration( $commitAttempt = $commitAttempt + 1 );
+        }
+    }
+}
+
+template checkMaster() {
+
+    /* master-state is available natively when querying junos-context */
+    if ( $junos-context ) {
+        if ( $junos-context/re-master ) {
+          <output> "master";
+        }
+        else {
+           <output> "backup";
+        }
+    }
+    /* if not available, other means are used to determine mastership */
+    else {
+
+        var $getReInfo = <get-route-engine-information> ;
+        var $reInfo = jcs:execute( $mgd, $getReInfo );
+
+        if ( $reInfo/..//xnm:error ) {
+            call rpcFailure( $rpc = $reInfo/.., $message = $script _ ": error communicating to determine if master" );
+            <xsl:message terminate="yes"> ;
+        }
+
+        /* if there is only one RE then it has to be master */
+        if ( $reInfo/route-engine ) {
+            if ( count( $reInfo/route-engine ) == 1 ) {
+                <output> "master";
+            } else {
+
+                /* this command only works on master RE with MX chassis */
+                var $getChassisInfo = <get-chassis-inventory> ;
+                var $chassisInfo = jcs:execute( $mgd, $getChassisInfo );
+
+                if ($chassisInfo/..//xnm:error) { 
+                    call rpcFailure( $rpc = $reInfo/.., $message = $script _ ": error getting Chassis information." );
+                    <xsl:message terminate="yes"> ;
+                }
+
+                if ( $chassisInfo/chassis/serial-number ) {
+                    <output> "master";
+                } else {
+                    <output> "backup";
+                }
+            }
+        } else {
+            expr jcs:syslog( "daemon.error", $script _ ": ERROR, Unexpected response: " _ $reInfo );
+            <xsl:message terminate="yes">;
+        }
+    }
+}
+
+
+template rpcFailure($rpc, $message = "Following errors occured while trying to gather data: ") {
+
+    expr jcs:syslog( "daemon.crit", $message );
+
+    for-each ( $rpc//xnm:error ) {
+        expr jcs:syslog( "daemon.crit", message );
+    }
+}
